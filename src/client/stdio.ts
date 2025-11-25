@@ -210,9 +210,67 @@ export class StdioClientTransport implements Transport {
     }
 
     async close(): Promise<void> {
+        const process = this._process;
+        
+        if (!process) {
+            console.log('[StdioTransport] close() called but no process exists');
+            return;
+        }
+        
+        console.log(`[StdioTransport] Closing transport (pid: ${process.pid}, exitCode: ${process.exitCode})`);
+        console.log(`[StdioTransport] AbortController aborted: ${this._abortController.signal.aborted}`);
+        
+        // Set up the close listener before killing
+        const closePromise = new Promise<void>((resolve) => {
+            if (process.exitCode !== null) {
+                // Already exited
+                console.log('[StdioTransport] Process already exited');
+                resolve();
+                return;
+            }
+            
+            let timeoutId: NodeJS.Timeout;
+            
+            const cleanup = (code?: number | null) => {
+                clearTimeout(timeoutId);
+                if (code !== undefined) {
+                    console.log(`[StdioTransport] Process closed with code: ${code}`);
+                }
+                resolve();
+            };
+            
+            process.once('close', cleanup);
+            
+            // Timeout after 5 seconds
+            timeoutId = setTimeout(() => {
+                console.log('[StdioTransport] Close timeout reached (5s), proceeding anyway');
+                console.log(`[StdioTransport] Process exitCode at timeout: ${process.exitCode}`);
+                console.log(`[StdioTransport] Process killed: ${process.killed}`);
+                process.removeListener('close', cleanup);
+                resolve();
+            }, 5000);
+        });
+        
+        console.log('[StdioTransport] Aborting controller...');
         this._abortController.abort();
-        this._process = undefined;
+        console.log(`[StdioTransport] AbortController aborted after abort(): ${this._abortController.signal.aborted}`);
         this._readBuffer.clear();
+        this._process = undefined;
+        
+        // Wait a bit to see if abort signal kills the process
+        await new Promise(resolve => setTimeout(resolve, 100));
+        console.log(`[StdioTransport] After 100ms wait - exitCode: ${process.exitCode}, killed: ${process.killed}`);
+        
+        // Explicitly kill the process if abort didn't work
+        if (process.exitCode === null) {
+            console.log('[StdioTransport] Explicitly killing process with SIGTERM');
+            const killResult = process.kill('SIGTERM');
+            console.log(`[StdioTransport] kill() returned: ${killResult}`);
+        }
+        
+        console.log('[StdioTransport] Waiting for process to exit...');
+        await closePromise;
+        console.log('[StdioTransport] Transport closed successfully');
     }
 
     send(message: JSONRPCMessage): Promise<void> {
